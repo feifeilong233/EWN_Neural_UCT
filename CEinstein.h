@@ -5,7 +5,6 @@
 #include<cmath>
 #include<memory>
 #include <iostream>
-#include <ctime>
 #include <chrono>
 #include <tuple>
 #include <omp.h>

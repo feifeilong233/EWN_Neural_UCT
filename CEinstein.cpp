@@ -898,8 +898,6 @@ std::shared_ptr<Board> UCT(int dice, int board[5][5], int &iteration, double qua
     } else {
         root = std::make_shared<Board>(none, 1, board, dice);
     }
-    time_t begin = clock();
-    time_t end = clock();
     iteration = 0;
     for (int i = 0; i < 6; i++) {
         for (int j = 0; j < 3; j++) {
@@ -907,15 +905,80 @@ std::shared_ptr<Board> UCT(int dice, int board[5][5], int &iteration, double qua
         }
     }
     std::mt19937 gen(rd());
+    auto start = std::chrono::steady_clock::now();
+    auto end = std::chrono::steady_clock::now();
+    auto diff_time = std::chrono::duration<double, std::milli>(end - start).count();
     torch::jit::script::Module model = torch::jit::load("Alpha1.pt", device);
     torch::NoGradGuard no_grad;
-    for (int a = 0; a < 1000; a++) {
+    while (diff_time < 15000) {
         std::shared_ptr<Board> p;
         p = Treepolicy(root);
         int result = NeuralSimulate(p, gen, model);
         Backup(p, result);
         iteration++;
+        end = std::chrono::steady_clock::now();
+        diff_time = std::chrono::duration<double, std::milli>(end - start).count();
     }
+    std::shared_ptr<Board> best;
+    best = MostWin(root, qualities);
+    return best;
+}
+
+std::shared_ptr<Board> UCTP(int dice, int board[5][5], int &iter, double qualities[6][3]) {
+    std::shared_ptr<Board> root;
+    std::shared_ptr<Board> none;
+    if (dice <= 6) {
+        root = std::make_shared<Board>(none, 0, board, dice);
+    } else {
+        root = std::make_shared<Board>(none, 1, board, dice);
+    }
+
+    int iteration = 0;
+    iter = 0;
+    for (int i = 0; i < 6; i++) {
+        for (int j = 0; j < 3; j++) {
+            qualities[i][j] = -1;
+        }
+    }
+
+    int Move_Num = root->posStep[0].size();
+    omp_set_num_threads(Move_Num);
+
+#pragma omp parallel for reduction(+:iteration)
+    for (int index = 0; index < Move_Num; index++) {
+        unsigned seed = std::chrono::system_clock::now().time_since_epoch().count() + omp_get_thread_num();
+        std::mt19937 gen(seed);
+        torch::jit::script::Module model = torch::jit::load("Alpha1.pt", device);
+        torch::NoGradGuard no_grad;
+        int newBoard[5][5];
+        for (int i = 0; i < 5; i++)
+            for (int j = 0; j < 5; j++)
+                newBoard[i][j] = root->board[i][j];
+        int pos[2];
+        pos[0] = root->posStep[0][index];
+        pos[1] = root->posStep[1][index];
+        oneMove(root->color, newBoard, pos[0], pos[1]);
+        std::shared_ptr<Board> newChild;
+        newChild = std::make_shared<Board>(root, !(bool) root->color, newBoard, pos);
+#pragma omp critical
+        {
+            root->child.push_back(newChild);
+        }
+
+        auto start = std::chrono::steady_clock::now();
+        auto end = std::chrono::steady_clock::now();
+        auto diff_time = std::chrono::duration<double, std::milli>(end - start).count();
+        while (diff_time < 5000) {
+            std::shared_ptr<Board> p;
+            p = Treepolicy(newChild);
+            int result = NeuralSimulate(p, gen, model);
+            Backup(p, result);
+            iteration++;
+            end = std::chrono::steady_clock::now();
+            diff_time = std::chrono::duration<double, std::milli>(end - start).count();
+        }
+    }
+    iter = iteration;
     std::shared_ptr<Board> best;
     best = MostWin(root, qualities);
     return best;
