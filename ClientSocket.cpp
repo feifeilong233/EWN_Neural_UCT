@@ -20,40 +20,31 @@ ClientSocket::~ClientSocket(void)
 */
 int ClientSocket::connectServer()
 {
-	std::cout << "Connect server: " << SERVER_IP << ":" << SERVER_PORT << std::endl;
-	int rtn = 0, err = 0;
-	WSADATA wsaData;
-	// initialize windows socket library
-	err = WSAStartup(0x0202, &wsaData);
-	if (err != NO_ERROR)
-	{
-		std::cout << "Failed with WSAStartup error: " << err << std::endl;
-		rtn = 1;
-		return rtn;
-	}
-	// creat socket
-	clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (clientSocket == INVALID_SOCKET)
-	{
-		std::cout << "Socket failed with error: " << WSAGetLastError() << std::endl;
-		rtn = 2;
-		return rtn;
-	}
-	// server address
-	memset(&server, 0, sizeof(SOCKADDR_IN));
-	server.sin_family = PF_INET;
-	server.sin_port = htons(SERVER_PORT);
-	server.sin_addr.s_addr = inet_addr(SERVER_IP);
-	// connect
-	err = connect(clientSocket, (struct sockaddr *) &server, sizeof(SOCKADDR_IN));
-	if (err < 0)
-	{
-		std::cout << "Connect failed with error: " << err << std::endl;
-		// printf("%d\n", WSAGetLastError);
-		rtn = 3;
-		return rtn;
-	}
-	return rtn;
+    std::cout << "Connect server: " << SERVER_IP << ":" << SERVER_PORT << std::endl;
+    int rtn = 0, err = 0;
+
+    clientSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (clientSocket == -1)
+    {
+        std::cout << "Socket failed with error" << std::endl;
+        rtn = 2;
+        return rtn;
+    }
+
+    memset(&server, 0, sizeof(struct sockaddr_in));
+    server.sin_family = AF_INET;
+    server.sin_port = htons(SERVER_PORT);
+    server.sin_addr.s_addr = inet_addr(SERVER_IP);
+
+    err = connect(clientSocket, (struct sockaddr *)&server, sizeof(struct sockaddr_in));
+    if (err < 0)
+    {
+        std::cout << "Connect failed with error" << std::endl;
+        rtn = 3;
+        return rtn;
+    }
+
+    return rtn;
 }
 
 
@@ -117,7 +108,7 @@ char* ClientSocket::getRecvMsg() {
 
 /*close client socket*/
 void ClientSocket::close() {
-	closesocket(clientSocket);
+	::close(clientSocket);
 
 	std::cout << "Close socket" << std::endl;
 }

@@ -1,9 +1,13 @@
 #pragma once
 #include "Define.h"
-#include <windows.h>
+//#include <windows.h>
 #include <iostream>
 
-#include <string>
+#include <cstring>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 
 #define BUFSIZE	128			
 
@@ -13,10 +17,10 @@ class ClientSocket
 {
 private:
 	//server address
-	SOCKADDR_IN server;
+    struct sockaddr_in server;
 
 	//client SOCKET that connect to the server
-	SOCKET clientSocket;
+	int clientSocket;
 
 	//the message buffer that is received from the server
 	char recvBuf[BUFSIZE];
