@@ -907,12 +907,17 @@ std::shared_ptr<Board> UCT(int dice, int board[5][5], int &iteration, double qua
     std::mt19937 gen(rd());
     torch::jit::script::Module model = torch::jit::load("Alpha1.pt", device);
     torch::NoGradGuard no_grad;
-    for (int i = 0; i < 1500; i++) {
+    auto start = std::chrono::steady_clock::now();
+    auto end = std::chrono::steady_clock::now();
+    auto diff_time = std::chrono::duration<double, std::milli>(end - start).count();
+    while (diff_time < 15000) {
         std::shared_ptr<Board> p;
         p = Treepolicy(root);
         int result = NeuralSimulate(p, gen, model);
         Backup(p, result);
         iteration++;
+        end = std::chrono::steady_clock::now();
+        diff_time = std::chrono::duration<double, std::milli>(end - start).count();
     }
     std::shared_ptr<Board> best;
     best = MostWin(root, qualities);
@@ -963,7 +968,7 @@ std::shared_ptr<Board> UCTP(int dice, int board[5][5], int &iter, double qualiti
         auto start = std::chrono::steady_clock::now();
         auto end = std::chrono::steady_clock::now();
         auto diff_time = std::chrono::duration<double, std::milli>(end - start).count();
-        while (diff_time < 5000) {
+        while (diff_time < 15000) {
             std::shared_ptr<Board> p;
             p = Treepolicy(newChild);
             int result = NeuralSimulate(p, gen, model);
