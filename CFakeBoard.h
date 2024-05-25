@@ -5,18 +5,6 @@
 #ifndef EWN_BRAVO_CFAKEBOARD_H
 #define EWN_BRAVO_CFAKEBOARD_H
 
-static int BLUE_VALUE[5][5] = {{50, 10, 6, 3, 1},
-                               {10, 8,  4, 2, 1},
-                               {6,  4,  4, 2, 1},
-                               {3,  2,  2, 2, 1},
-                               {1,  1,  1, 1, 0}};
-
-static int RED_VALUE[5][5] = {{0, 1, 1, 1,  1},
-                              {1, 2, 2, 2,  3},
-                              {1, 2, 4, 4,  6},
-                              {1, 2, 4, 8,  10},
-                              {1, 3, 6, 10, 50}};
-
 class FakeBoard {
 public:
     double pro[13] = {0.0};
@@ -104,7 +92,7 @@ public:
         getThread(b);
     }
 
-    double getScore(int col, double beta = 3.48, double lam = 2.18) {
+    double getScore(int col, double beta = 2.2, double lam = 5) {
         double expRed = 0;
         double expBlue = 0;
 

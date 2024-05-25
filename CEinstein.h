@@ -9,6 +9,7 @@
 #include <tuple>
 #include <omp.h>
 #include <random>
+#include "Board.h"
 #include "CFakeBoard.h"
 #include <torch/torch.h>
 #include <torch/script.h>

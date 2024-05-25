@@ -5,322 +5,178 @@ time_t begin_time;
 time_t end_time;
 struct tm *pt;
 
-const double coe = 0.85;
-const double kilo = 1.15;
-const double lamda = 5;
-const double betaone = 2.2;
+const double coe = 1.414;
+const double kilo = 10;
+const double tempo = 1;
 std::uniform_int_distribution<int> dis(1, 6);
-std::uniform_int_distribution<int> dis2(0, 1);
-std::uniform_int_distribution<int> dis3(0, 2);
 std::random_device rd;
 std::mt19937 generator(rd());
 
-torch::DeviceType device_type = at::kCUDA;
+torch::DeviceType device_type = at::kCPU;
 torch::Device device(device_type);
+torch::jit::script::Module model = torch::jit::load("Alpha1.pt", device);
+torch::NoGradGuard no_grad;
 
-class Board {
-public:
-    std::shared_ptr<Board> parent;
-    std::vector<int> validchess;            //可以走的棋子
-    int chess[2] = {0, -1};            //导致这个棋局要走的棋子和方向
-    std::vector<int> posStep[2];            //可能的走法的个数，要分种类，0水平走位、1垂直走位、2对角走位
-    int color;                    //红色为0，蓝色为1
-    int board[5][5] = {};                //棋盘
-    int visit_times = 0;
-    int win_time = 0;
-    double quality = 0.0;
-    double pro[13] = {0.0};            //棋子移动概率
-    int LocValue[13] = {0};
-    int ChessState[13] = {0};            //棋子状态
-    std::vector<std::shared_ptr<Board>> child;
-
-    std::pair<int, int> findNearby(int n) {
-        std::pair<int, int> ans = {-1, -1};
-        if (n > 6) {
-            for (int i = n - 1; i >= 7; --i) {
-                if (ChessState[i] != 0) {
-                    ans.first = i;
-                    break;
+// 获取红蓝方的5x5map
+void get_alldata_5(std::shared_ptr<Board> current_status, std::deque<std::array<std::array<int, 5>, 5>> &DQ) {
+    // 处理当前状态的board
+    std::array<std::array<int, 5>, 5> datanew1{};
+    std::array<std::array<int, 5>, 5> datanew2{};
+    for (int i = 0; i < 5; ++i) {
+        for (int j = 0; j < 5; ++j) {
+            int temp = current_status->board[i][j];
+            if (temp && temp < 7) {
+                datanew1[i][j] = temp;
+            } else if (temp > 6) {
+                datanew2[i][j] = temp;
+            }
+        }
+    }
+    DQ.push_back(datanew1);
+    DQ.push_back(datanew2);
+    // 处理父状态的board
+    auto parent_status = current_status->parent;
+    for (int ii = 0; ii < 4; ++ii) {
+        if (parent_status) {
+            std::array<std::array<int, 5>, 5> datanew3{};
+            std::array<std::array<int, 5>, 5> datanew4{};
+            for (int i = 0; i < 5; ++i) {
+                for (int j = 0; j < 5; ++j) {
+                    int temp = parent_status->board[i][j];
+                    if (temp && temp < 7) {
+                        datanew3[i][j] = temp;
+                    } else if (temp > 6) {
+                        datanew4[i][j] = temp;
+                    }
                 }
             }
-            for (int i = n + 1; i <= 12; ++i) {
-                if (ChessState[i] != 0) {
-                    ans.second = i;
-                    break;
-                }
-            }
+            DQ.push_back(datanew3);
+            DQ.push_back(datanew4);
+            parent_status = parent_status->parent;
         } else {
-            for (int i = n - 1; i >= 1; --i) {
-                if (ChessState[i] != 0) {
-                    ans.first = i;
-                    break;
-                }
-            }
-            for (int i = n + 1; i <= 6; ++i) {
-                if (ChessState[i] != 0) {
-                    ans.second = i;
-                    break;
-                }
-            }
+            break;
         }
-        return ans;
     }
+}
 
-    void getPro() {
-        std::fill_n(pro, 13, 1.0 / 6);
-        pro[0] = 0;
-        //计算棋子移动概率（结果×6）
-        for (int i = 1; i < 13; i++) {
-            if (ChessState[i] == 0) {
-                int pr, pl;
-                std::tie(pr, pl) = findNearby(i);
-                if (pr != -1 && pl != -1) {
-                    if (LocValue[pr] > LocValue[pl]) {
-                        pro[pr] += pro[i];
-                    } else if (LocValue[pr] == LocValue[pl]) {
-                        pro[pr] += pro[i] / 2;
-                        pro[pl] += pro[i] / 2;
-                    } else {
-                        pro[pl] += pro[i];
-                    }
-                } else if (pr != -1) {
-                    pro[pr] += pro[i];
-                } else if (pl != -1) {
-                    pro[pl] += pro[i];
-                }
-                pro[i] = 0;
+void get_alldata_5blue(std::shared_ptr<Board> current_status, std::deque<std::array<std::array<int, 5>, 5>> &DQ) {
+    // 处理当前状态的board
+    std::array<std::array<int, 5>, 5> datanew1{};
+    std::array<std::array<int, 5>, 5> datanew2{};
+    for (int i = 0; i < 5; ++i) {
+        for (int j = 0; j < 5; ++j) {
+            int temp = current_status->board[i][j];
+            if (temp && temp < 7) {
+                datanew1[j][i] = temp + 6;
+            } else if (temp > 6) {
+                datanew2[j][i] = temp - 6;
             }
         }
     }
-
-    double getScore(double beta = betaone, double lam = lamda) {
-        double redToBlueOfThread, blueToRedOfThread;
-        std::tie(redToBlueOfThread, blueToRedOfThread) = getThread();
-        double expRed = 0;
-        double expBlue = 0;
-
-        for (int i = 1; i < 13; ++i) {
-            if (i < 7) {
-                if (ChessState[i] == 0) {
-                    continue;
-                }
-                expRed += pro[i] * LocValue[i];
-            } else {
-                if (ChessState[i] == 0) {
-                    continue;
-                }
-                expBlue += pro[i] * LocValue[i];
-            }
-        }
-
-        double theValue = color ? lam * (beta * expRed - expBlue) + redToBlueOfThread - blueToRedOfThread :
-                          lam * (beta * expBlue - expRed) + blueToRedOfThread - redToBlueOfThread;
-        return theValue;
-    }
-
-    std::pair<double, double> getThread() {
-        double redToBlueOfThread = 0.0;
-        double blueToRedOfThread = 0.0;
-
-        // 计算威胁值
-        int Direction[3][2] = {{1, 0},
-                               {1, 1},
-                               {0, 1}};
-        for (int i = 0; i < 5; i++) {
-            for (int j = 0; j < 5; j++) {
-                int piece = board[i][j];
-                if (piece) {
-                    bool f = piece < 7;
-                    for (int k = 0; k < 3; k++) {
-                        int dx = i + (f ? 1 : -1) * Direction[k][0];
-                        int dy = j + (f ? 1 : -1) * Direction[k][1];
-                        if (dx >= 0 && dx < 5 && dy >= 0 && dy < 5) {
-                            int targetPiece = board[dx][dy];
-                            if (targetPiece && ((f && targetPiece > 6) || (!f && targetPiece < 7))) {
-                                if (f) {
-                                    redToBlueOfThread += pro[piece];
-                                } else {
-                                    blueToRedOfThread += pro[piece];
-                                }
-                                break;
-                            }
-                        }
+    DQ.push_back(datanew2);
+    DQ.push_back(datanew1);
+    // 处理父状态的board
+    auto parent_status = current_status->parent;
+    for (int ii = 0; ii < 4; ++ii) {
+        if (parent_status) {
+            std::array<std::array<int, 5>, 5> datanew3{};
+            std::array<std::array<int, 5>, 5> datanew4{};
+            for (int i = 0; i < 5; ++i) {
+                for (int j = 0; j < 5; ++j) {
+                    int temp = parent_status->board[j][i];
+                    if (temp && temp < 7) {
+                        datanew3[i][j] = temp + 6;
+                    } else if (temp > 6) {
+                        datanew4[i][j] = temp - 6;
                     }
                 }
             }
-        }
-        return std::make_pair(redToBlueOfThread, blueToRedOfThread);
-    }
-
-    Board(std::shared_ptr<Board> par, int col, int b[5][5], int pos[2]) {
-        parent = par;
-        color = col;
-        chess[0] = pos[0];
-        chess[1] = pos[1];
-        // 遍历board数组
-        for (int i = 0; i < 5; ++i) {
-            for (int j = 0; j < 5; ++j) {
-                int a = b[i][j];
-                board[i][j] = a;
-                // 如果board上的值是1到12之间的数字，则将对应的ChessState设置为1
-                if (a > 0 && a < 13) {
-                    ChessState[a] = 1;
-                    if (a < 7) {
-                        LocValue[a] = RED_VALUE[i][j];
-                        if (col == 0)
-                            validchess.push_back(a);
-                    } else {
-                        LocValue[a] = BLUE_VALUE[i][j];
-                        if (col == 1)
-                            validchess.push_back(a - 6);
-                    }
-                }
-            }
-        }
-        getPro();
-        com_posStep();
-    }
-
-    void com_posStep() {
-        if (color == 0) {
-            for (int i = 0; i < validchess.size(); i++) {
-                int x, y;
-                for (int j = 0; j < 5; j++)
-                    for (int k = 0; k < 5; k++) {
-                        if (board[j][k] == validchess[i]) {
-                            x = j;
-                            y = k;
-                            break;
-                        }
-                    }
-                if (x == 4) {
-                    posStep[0].push_back(validchess[i]);
-                    posStep[1].push_back(0);
-                } else if (y == 4) {
-                    posStep[0].push_back(validchess[i]);
-                    posStep[1].push_back(1);
-                } else {
-                    posStep[0].push_back(validchess[i]);
-                    posStep[1].push_back(0);
-                    posStep[0].push_back(validchess[i]);
-                    posStep[1].push_back(1);
-                    posStep[0].push_back(validchess[i]);
-                    posStep[1].push_back(2);
-                }
-            }
+            DQ.push_back(datanew4);
+            DQ.push_back(datanew3);
+            parent_status = parent_status->parent;
         } else {
-            for (int i = 0; i < validchess.size(); i++) {
-                int x, y;
-                for (int j = 0; j < 5; j++)
-                    for (int k = 0; k < 5; k++) {
-                        if (board[j][k] == validchess[i] + 6) {
-                            x = j;
-                            y = k;
-                            break;
-                        }
-                    }
-                if (x == 0) {
-                    posStep[0].push_back(validchess[i]);
-                    posStep[1].push_back(0);
-                } else if (y == 0) {
-                    posStep[0].push_back(validchess[i]);
-                    posStep[1].push_back(1);
-                } else {
-                    posStep[0].push_back(validchess[i]);
-                    posStep[1].push_back(0);
-                    posStep[0].push_back(validchess[i]);
-                    posStep[1].push_back(1);
-                    posStep[0].push_back(validchess[i]);
-                    posStep[1].push_back(2);
-                }
-            }
+            break;
         }
     }
+}
 
-    Board(std::shared_ptr<Board> par, int col, int a[5][5], int dice) {
-        parent = par;
-        color = col;
-        // 遍历board数组
-        for (int i = 0; i < 5; ++i) {
-            for (int j = 0; j < 5; ++j) {
-                int temp = a[i][j];
-                board[i][j] = temp;
-                // 如果board上的值是1到12之间的数字，则将对应的ChessState设置为1
-                if (temp > 0 && temp < 13) {
-                    ChessState[temp] = 1;
-                }
-            }
-        }
-
-        if (col == 0) {
-            if (ChessState[dice] == 1)
-                validchess.push_back(dice);
-            else {
-                for (int i = dice - 1; i > 0; i--) {
-                    if (ChessState[i] == 1) {
-                        validchess.push_back(i);
-                        break;
-                    }
-                }
-                for (int i = dice + 1; i < 7; i++) {
-                    if (ChessState[i] == 1) {
-                        validchess.push_back(i);
-                        break;
-                    }
-                }
-            }
-        } else {
-            if (ChessState[dice] == 1)
-                validchess.push_back(dice - 6);
-            else {
-                for (int i = dice - 1; i > 6; i--) {
-                    if (ChessState[i] == 1) {
-                        validchess.push_back(i - 6);
-                        break;
-                    }
-                }
-                for (int i = dice + 1; i < 13; i++) {
-                    if (ChessState[i] == 1) {
-                        validchess.push_back(i - 6);
-                        break;
-                    }
-                }
-            }
-        }
-        com_posStep();
+torch::Tensor queueToTensor(std::deque<std::array<std::array<int, 5>, 5>> &DQ) {
+    torch::Tensor tensor = torch::zeros({10, 5, 5}, torch::kFloat);
+    int i = 0;
+    for (const auto &board: DQ) {
+        torch::Tensor tBoard = torch::from_blob((int *) board.data(), {5, 5}, torch::kInt32);
+        tensor[i++] = tBoard.clone();
     }
-};
-
-std::shared_ptr<Board> BestChild(std::shared_ptr<Board> v, double c, double k);
-
-std::shared_ptr<Board> MostWin(std::shared_ptr<Board> v, double qualities[6][3]);
-
-std::shared_ptr<Board> Expand(std::shared_ptr<Board> v);
-
-bool is_Terminal(std::shared_ptr<Board> v);
-
-bool is_Expanded(std::shared_ptr<Board> v);
-
-std::shared_ptr<Board> Treepolicy(std::shared_ptr<Board> v);
-
-void oneMove(int color, int newboard[5][5], int chess, int direction);
-
-void Backup(std::shared_ptr<Board> v, int result);
-
-/***** UCT ******/
+    return tensor;
+}
 
 //返回最佳子节点
 std::shared_ptr<Board> BestChild(std::shared_ptr<Board> v, double c, double k) {
     std::shared_ptr<Board> q;
     double max = -1.0e10;
-    for (int i = 0; i < v->child.size(); i++) {
-        double EVS = v->child[i]->getScore(betaone, lamda);
-        double UCB = v->child[i]->quality / (double) v->child[i]->visit_times +
-                     c * sqrt(2 * log((double) v->visit_times) / (double) v->child[i]->visit_times) +
-                     k * EVS / (double) v->child[i]->visit_times;
-        if (UCB - max > 0.0) {
-            q = v->child[i];
-            max = UCB;
+    if (v->color == 0) {
+        std::deque<std::array<std::array<int, 5>, 5>> Q;
+        get_alldata_5blue(v, Q);
+        torch::Tensor datanew = queueToTensor(Q);
+        datanew = datanew.to(device);
+        datanew = datanew.unsqueeze(0);
+        torch::Tensor outnew = model.forward({datanew}).toTensor();
+        torch::Tensor out = torch::zeros({25});
+        out = out.to(device);
+        outnew = outnew.squeeze();
+        for (int i = 0; i < 6; ++i) {
+            torch::Tensor oneStatus = outnew.slice(0, i * 4, (i + 1) * 4);
+            out.slice(0, i * 4, (i + 1) * 4) = 3 * torch::softmax(oneStatus, 0);
+            for (int index = i * 4; index < (i + 1) * 4; ++index) {
+                if (index < 3) {
+                    if (out[index].item<double>() < 0.2) {
+                        out[index] = 0.2;
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < v->child.size(); i++) {
+            // 根据v->child[i]->chess[0](棋子)和v->child[i]->chess[1](方向0 1 2)找到对应的概率
+            double prob = out[(v->child[i]->chess[0] - 7) * 4 + v->child[i]->chess[1]].item<double>();
+            double UCB = v->child[i]->quality / (double) v->child[i]->visit_times +
+                         c * sqrt(2 * log((double) v->visit_times) / (double) v->child[i]->visit_times) +
+                         k * prob / (double) v->child[i]->visit_times;
+            if (UCB > max) {
+                q = v->child[i];
+                max = UCB;
+            }
+        }
+    } else {
+        std::deque<std::array<std::array<int, 5>, 5>> Q;
+        get_alldata_5(v, Q);
+        torch::Tensor datanew = queueToTensor(Q);
+        datanew = datanew.to(device);
+        datanew = datanew.unsqueeze(0);
+        torch::Tensor outnew = model.forward({datanew}).toTensor();
+        torch::Tensor out = torch::zeros({25});
+        out = out.to(device);
+        outnew = outnew.squeeze();
+        for (int i = 0; i < 6; ++i) {
+            torch::Tensor oneStatus = outnew.slice(0, i * 4, (i + 1) * 4);
+            out.slice(0, i * 4, (i + 1) * 4) = 3 * torch::softmax(oneStatus, 0);
+            for (int index = i * 4; index < (i + 1) * 4; ++index) {
+                if (index < 3) {
+                    if (out[index].item<double>() < 0.2) {
+                        out[index] = 0.2;
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < v->child.size(); i++) {
+            // 根据v->child[i]->chess[0](棋子)和v->child[i]->chess[1](方向0 1 2)找到对应的概率
+            double prob = out[(v->child[i]->chess[0] - 1) * 4 + v->child[i]->chess[1]].item<double>();
+            double UCB = v->child[i]->quality / (double) v->child[i]->visit_times +
+                         c * sqrt(2 * log((double) v->visit_times) / (double) v->child[i]->visit_times) +
+                         k * prob / (double) v->child[i]->visit_times;
+            if (UCB > max) {
+                q = v->child[i];
+                max = UCB;
+            }
         }
     }
     return q;
@@ -339,6 +195,47 @@ std::shared_ptr<Board> MostWin(std::shared_ptr<Board> v, double qualities[6][3])
         }
     }
     return p;
+}
+
+void oneMove(int color, int newboard[5][5], int chess, int direction) {
+    int x, y;
+    if (color == 0) {
+        for (int i = 0; i < 5; i++)
+            for (int j = 0; j < 5; j++)
+                if (newboard[i][j] == chess) {
+                    x = i;
+                    y = j;
+                    break;
+                }
+        if (direction == 0) {
+            newboard[x][y + 1] = chess;
+            newboard[x][y] = 0;
+        } else if (direction == 1) {
+            newboard[x + 1][y] = chess;
+            newboard[x][y] = 0;
+        } else {
+            newboard[x + 1][y + 1] = chess;
+            newboard[x][y] = 0;
+        }
+    } else {
+        for (int i = 0; i < 5; i++)
+            for (int j = 0; j < 5; j++)
+                if (newboard[i][j] == chess + 6) {
+                    x = i;
+                    y = j;
+                    break;
+                }
+        if (direction == 0) {
+            newboard[x][y - 1] = chess + 6;
+            newboard[x][y] = 0;
+        } else if (direction == 1) {
+            newboard[x - 1][y] = chess + 6;
+            newboard[x][y] = 0;
+        } else {
+            newboard[x - 1][y - 1] = chess + 6;
+            newboard[x][y] = 0;
+        }
+    }
 }
 
 //拓展
@@ -371,47 +268,6 @@ std::shared_ptr<Board> Expand(std::shared_ptr<Board> v) {
     std::shared_ptr<Board> newChild(new Board(v, !(bool) v->color, newBoard, pos));
     v->child.push_back(newChild);
     return newChild;
-}
-
-void oneMove(int color, int newboard[5][5], int chess, int direction) {
-    int x, y;
-    if (color == 0) {
-        for (int i = 0; i < 5; i++)
-            for (int j = 0; j < 5; j++)
-                if (newboard[i][j] == chess) {
-                    x = i;
-                    y = j;
-                    //break;
-                }
-        if (direction == 0) {
-            newboard[x][y + 1] = chess;
-            newboard[x][y] = 0;
-        } else if (direction == 1) {
-            newboard[x + 1][y] = chess;
-            newboard[x][y] = 0;
-        } else {
-            newboard[x + 1][y + 1] = chess;
-            newboard[x][y] = 0;
-        }
-    } else {
-        for (int i = 0; i < 5; i++)
-            for (int j = 0; j < 5; j++)
-                if (newboard[i][j] == chess + 6) {
-                    x = i;
-                    y = j;
-                    //break;
-                }
-        if (direction == 0) {
-            newboard[x][y - 1] = chess + 6;
-            newboard[x][y] = 0;
-        } else if (direction == 1) {
-            newboard[x - 1][y] = chess + 6;
-            newboard[x][y] = 0;
-        } else {
-            newboard[x - 1][y - 1] = chess + 6;
-            newboard[x][y] = 0;
-        }
-    }
 }
 
 //搜索策略
@@ -449,82 +305,34 @@ std::shared_ptr<Board> Treepolicy(std::shared_ptr<Board> v) {
     return v;
 }
 
-void insertNewData(std::deque<std::array<std::array<int, 5>, 5>> &DQ, const int newBoard[5][5]) {
-    if (DQ.size() >= 10) {
-        DQ.pop_back();
-        DQ.pop_back();
-    }
-    std::array<std::array<int, 5>, 5> datanew1{};
-    std::array<std::array<int, 5>, 5> datanew2{};
-    for (int i = 0; i < 5; ++i) {
-        for (int j = 0; j < 5; ++j) {
-            int temp = newBoard[i][j];
-            if (temp && temp < 7) {
-                datanew1[i][j] = temp;
-            } else if (temp > 6) {
-                datanew2[i][j] = temp;
-            }
-        }
-    }
-    DQ.push_front(datanew2);
-    DQ.push_front(datanew1);
+int random_choices(const std::vector<double> &weights) {
+    // 初始化随机数生成器
+    std::random_device rdd;
+    std::mt19937 gene(rdd());
+    // 创建离散分布
+    std::discrete_distribution<> dist(weights.begin(), weights.end());
+    // 根据权重选择元素
+    return dist(gene);
 }
 
-// 获取红蓝方的5x5map
-void get_alldata_5(std::shared_ptr<Board> current_status, std::deque<std::array<std::array<int, 5>, 5>> &DQ) {
-    // 处理当前状态的board
-    std::array<std::array<int, 5>, 5> datanew1{};
-    std::array<std::array<int, 5>, 5> datanew2{};
-    for (int i = 0; i < 5; ++i) {
-        for (int j = 0; j < 5; ++j) {
-            int temp = current_status->board[i][j];
-            if (temp && temp < 7) {
-                datanew1[i][j] = temp;
-            } else if (temp > 6) {
-                datanew2[i][j] = temp;
-            }
-        }
+template<typename T>
+std::vector<T> SoftMax(const std::vector<T> &input, double temperature = 1.0) {
+    std::vector<T> output(input.size());
+    T maxElement = *std::max_element(input.begin(), input.end());
+    T sum = 0;
+    // 计算指数的和
+    for (size_t i = 0; i < input.size(); ++i) {
+        output[i] = std::exp((input[i] - maxElement) / temperature); // 添加温度参数
+        sum += output[i];
     }
-    DQ.push_back(datanew1);
-    DQ.push_back(datanew2);
-    // 处理父状态的board
-    auto parent_status = current_status->parent;
-    for (int i = 0; i < 4; ++i) {
-        if (parent_status) {
-            std::array<std::array<int, 5>, 5> datanew3{};
-            std::array<std::array<int, 5>, 5> datanew4{};
-            for (int i = 0; i < 5; ++i) {
-                for (int j = 0; j < 5; ++j) {
-                    int temp = parent_status->board[i][j];
-                    if (temp && temp < 7) {
-                        datanew3[i][j] = temp;
-                    } else if (temp > 6) {
-                        datanew4[i][j] = temp;
-                    }
-                }
-            }
-            DQ.push_back(datanew3);
-            DQ.push_back(datanew4);
-            parent_status = parent_status->parent;
-        } else {
-            break;
-        }
+    // 归一化以得到概率分布
+    for (T &val: output) {
+        val /= sum;
     }
+    return output;
 }
 
-torch::Tensor queueToTensor(std::deque<std::array<std::array<int, 5>, 5>> &DQ) {
-    torch::Tensor tensor = torch::zeros({10, 5, 5}, torch::kFloat);
-    int i = 0;
-    for (const auto &board: DQ) {
-        torch::Tensor tBoard = torch::from_blob((int *) board.data(), {5, 5}, torch::kInt32);
-        tensor[i++] = tBoard.clone();
-    }
-    return tensor;
-}
-
-bool
-NetworkandEVS(std::shared_ptr<Board> v, bool col, std::mt19937 &gen, std::deque<std::array<std::array<int, 5>, 5>> &Q,
-              torch::jit::script::Module &model) {
+bool RandChoice(std::shared_ptr<Board> v, bool col, std::mt19937 &gen) {
     int ch[7] = {0};
     int x, y;
     int DICE = dis(gen);
@@ -546,50 +354,43 @@ NetworkandEVS(std::shared_ptr<Board> v, bool col, std::mt19937 &gen, std::deque<
             if (x == 4) {
                 v->board[x][y + 1] = DICE;
                 v->board[x][y] = 0;
-                insertNewData(Q, v->board);
             } else if (y == 4) {
                 v->board[x + 1][y] = DICE;
                 v->board[x][y] = 0;
-                insertNewData(Q, v->board);
             } else {
-                torch::Tensor datanew = queueToTensor(Q);
-                datanew = datanew.to(device);
-                datanew = datanew.unsqueeze(0);
-                torch::Tensor outnew = model.forward({datanew}).toTensor();
-                torch::Tensor out = torch::zeros({25});
-                out = out.to(device);
-                outnew = outnew.squeeze();
-                for (int i = 0; i < 6; ++i) {
-                    torch::Tensor oneStatus = outnew.slice(0, i * 4, (i + 1) * 4);
-                    out.slice(0, i * 4, (i + 1) * 4) = 3 * torch::softmax(oneStatus, 0);
-                    for (int index = i * 4; index < (i + 1) * 4; ++index) {
-                        if (index < 3) {
-                            if (out[index].item<double>() < 0.2) {
-                                out[index] = 0.2;
-                            }
-                        }
+                int direct;
+                std::vector<double> max_problis;
+                for (int index = 0; index < 3; index++) {
+                    int newBoard[5][5];
+                    for (int i = 0; i < 5; i++)
+                        for (int j = 0; j < 5; j++)
+                            newBoard[i][j] = v->board[i][j];
+                    if (index == 0) {
+                        newBoard[x][y + 1] = DICE;
+                    } else if (index == 1) {
+                        newBoard[x + 1][y] = DICE;
+                    } else {
+                        newBoard[x + 1][y + 1] = DICE;
                     }
+                    newBoard[x][y] = 0;
+                    FakeBoard FB(newBoard);
+                    double EVS = FB.getScore(0, betaone, lamda);
+                    max_problis.push_back(EVS);
                 }
-                torch::Tensor problis = out.slice(0, (DICE - 1) * 4, DICE * 4 - 1);
-                int move_choose = torch::argmax(problis).item<int>();
-                if (move_choose == 0) {
+                direct = random_choices(SoftMax(max_problis, tempo));
+                if (direct == 0) {
                     v->board[x][y + 1] = DICE;
-                    v->board[x][y] = 0;
-                    insertNewData(Q, v->board);
-                } else if (move_choose == 1) {
+                } else if (direct == 1) {
                     v->board[x + 1][y] = DICE;
-                    v->board[x][y] = 0;
-                    insertNewData(Q, v->board);
                 } else {
                     v->board[x + 1][y + 1] = DICE;
-                    v->board[x][y] = 0;
-                    insertNewData(Q, v->board);
                 }
+                v->board[x][y] = 0;
             }
         } else {
             int validchess[2] = {-1, -1};
-            float max = -1.0e10;
-            int pos[4]; // x, y, direction, chess
+            std::vector<double> max_problis;
+            std::vector<std::vector<int>> consider;
             for (int i = DICE - 1; i > 0; i--) {
                 if (ch[i] == 1) {
                     validchess[0] = i;
@@ -613,70 +414,62 @@ NetworkandEVS(std::shared_ptr<Board> v, bool col, std::mt19937 &gen, std::deque<
                             break;
                         }
                     }
-                torch::Tensor datanew = queueToTensor(Q);
-                datanew = datanew.to(device);
-                datanew = datanew.unsqueeze(0);
-                torch::Tensor outnew = model.forward({datanew}).toTensor();
-                torch::Tensor out = torch::zeros({25});
-                out = out.to(device);
-                outnew = outnew.squeeze();
-                for (int i = 0; i < 6; ++i) {
-                    torch::Tensor oneStatus = outnew.slice(0, i * 4, (i + 1) * 4);
-                    out.slice(0, i * 4, (i + 1) * 4) = 3 * torch::softmax(oneStatus, 0);
-                    for (int index = i * 4; index < (i + 1) * 4; ++index) {
-                        if (index < 3) {
-                            if (out[index].item<double>() < 0.2) {
-                                out[index] = 0.2;
-                            }
-                        }
-                    }
-                }
                 if (x == 4) {
-                    torch::Tensor problis = out.slice(0, (validchess[i] - 1) * 4, validchess[i] * 4 - 1);
-                    auto probli = problis[0].item<float>();
-                    if (probli - max > 0.0) {
-                        pos[0] = x;
-                        pos[1] = y;
-                        pos[2] = 0;
-                        pos[3] = validchess[i];
-                        max = probli;
-                    }
+                    int newBoard[5][5];
+                    for (int m = 0; m < 5; m++)
+                        for (int n = 0; n < 5; n++)
+                            newBoard[m][n] = v->board[m][n];
+                    newBoard[x][y + 1] = validchess[i];
+                    newBoard[x][y] = 0;
+                    FakeBoard FB(newBoard);
+                    double EVS = FB.getScore(0, betaone, lamda);
+                    max_problis.push_back(EVS);
+                    std::vector<int> pos = {x, y, 0, validchess[i]};
+                    consider.push_back(pos);
                 } else if (y == 4) {
-                    torch::Tensor problis = out.slice(0, (validchess[i] - 1) * 4, validchess[i] * 4 - 1);
-                    auto probli = problis[1].item<float>();
-                    if (probli - max > 0.0) {
-                        pos[0] = x;
-                        pos[1] = y;
-                        pos[2] = 0;
-                        pos[3] = validchess[i];
-                        max = probli;
-                    }
+                    int newBoard[5][5];
+                    for (int m = 0; m < 5; m++)
+                        for (int n = 0; n < 5; n++)
+                            newBoard[m][n] = v->board[m][n];
+                    newBoard[x + 1][y] = validchess[i];
+                    newBoard[x][y] = 0;
+                    FakeBoard FB(newBoard);
+                    double EVS = FB.getScore(0, betaone, lamda);
+                    max_problis.push_back(EVS);
+                    std::vector<int> pos = {x, y, 1, validchess[i]};
+                    consider.push_back(pos);
                 } else {
-                    torch::Tensor problis = out.slice(0, (validchess[i] - 1) * 4, validchess[i] * 4 - 1);
-                    int move_index = torch::argmax(problis).item<int>();
-                    auto probli = problis[move_index].item<float>();
-                    if (probli - max > 0.0) {
-                        pos[0] = x;
-                        pos[1] = y;
-                        pos[2] = 0;
-                        pos[3] = validchess[i];
-                        max = probli;
+                    for (int index = 0; index < 3; index++) {
+                        int newBoard[5][5];
+                        for (int m = 0; m < 5; m++)
+                            for (int n = 0; n < 5; n++)
+                                newBoard[m][n] = v->board[m][n];
+                        if (index == 0) {
+                            newBoard[x][y + 1] = DICE;
+                        } else if (index == 1) {
+                            newBoard[x + 1][y] = DICE;
+                        } else {
+                            newBoard[x + 1][y + 1] = DICE;
+                        }
+                        newBoard[x][y] = 0;
+                        FakeBoard FB(newBoard);
+                        double EVS = FB.getScore(0, betaone, lamda);
+                        max_problis.push_back(EVS);
+                        std::vector<int> pos = {x, y, index, validchess[i]};
+                        consider.push_back(pos);
                     }
                 }
             }
+            int direct = random_choices(SoftMax(max_problis, tempo));
+            std::vector<int> pos = consider[direct];
             if (pos[2] == 0) {
                 v->board[pos[0]][pos[1] + 1] = pos[3];
-                v->board[pos[0]][pos[1]] = 0;
-                insertNewData(Q, v->board);
             } else if (pos[2] == 1) {
                 v->board[pos[0] + 1][pos[1]] = pos[3];
-                v->board[pos[0]][pos[1]] = 0;
-                insertNewData(Q, v->board);
             } else {
                 v->board[pos[0] + 1][pos[1] + 1] = pos[3];
-                v->board[pos[0]][pos[1]] = 0;
-                insertNewData(Q, v->board);
             }
+            v->board[pos[0]][pos[1]] = 0;
         }
     } else {
         for (int i = 0; i < 5; i++)
@@ -696,14 +489,12 @@ NetworkandEVS(std::shared_ptr<Board> v, bool col, std::mt19937 &gen, std::deque<
             if (x == 0) {
                 v->board[x][y - 1] = DICE + 6;
                 v->board[x][y] = 0;
-                insertNewData(Q, v->board);
             } else if (y == 0) {
                 v->board[x - 1][y] = DICE + 6;
                 v->board[x][y] = 0;
-                insertNewData(Q, v->board);
             } else {
-                double max = -1.0e10;
                 int direct;
+                std::vector<double> max_problis;
                 for (int index = 0; index < 3; index++) {
                     int newBoard[5][5];
                     for (int i = 0; i < 5; i++)
@@ -711,37 +502,30 @@ NetworkandEVS(std::shared_ptr<Board> v, bool col, std::mt19937 &gen, std::deque<
                             newBoard[i][j] = v->board[i][j];
                     if (index == 0) {
                         newBoard[x][y - 1] = DICE + 6;
-                        newBoard[x][y] = 0;
                     } else if (index == 1) {
                         newBoard[x - 1][y] = DICE + 6;
-                        newBoard[x][y] = 0;
                     } else {
                         newBoard[x - 1][y - 1] = DICE + 6;
-                        newBoard[x][y] = 0;
                     }
+                    newBoard[x][y] = 0;
                     FakeBoard FB(newBoard);
                     double EVS = FB.getScore(1, betaone, lamda);
-                    if (EVS - max > 0.0) {
-                        direct = index;
-                        max = EVS;
-                    }
+                    max_problis.push_back(EVS);
                 }
+                direct = random_choices(SoftMax(max_problis, tempo));
                 if (direct == 0) {
                     v->board[x][y - 1] = DICE + 6;
-                    v->board[x][y] = 0;
                 } else if (direct == 1) {
                     v->board[x - 1][y] = DICE + 6;
-                    v->board[x][y] = 0;
                 } else {
                     v->board[x - 1][y - 1] = DICE + 6;
-                    v->board[x][y] = 0;
                 }
-                insertNewData(Q, v->board);
+                v->board[x][y] = 0;
             }
         } else {
             int validchess[2] = {-1, -1};
-            double max = -1.0e10;
-            int pos[4]; // x, y, direction, chess
+            std::vector<double> max_problis;
+            std::vector<std::vector<int>> consider;
             for (int i = DICE - 1; i > 0; i--) {
                 if (ch[i] == 1) {
                     validchess[0] = i + 6;
@@ -774,13 +558,9 @@ NetworkandEVS(std::shared_ptr<Board> v, bool col, std::mt19937 &gen, std::deque<
                     newBoard[x][y] = 0;
                     FakeBoard FB(newBoard);
                     double EVS = FB.getScore(1, betaone, lamda);
-                    if (EVS - max > 0.0) {
-                        pos[0] = x;
-                        pos[1] = y;
-                        pos[2] = 0;
-                        pos[3] = validchess[i];
-                        max = EVS;
-                    }
+                    max_problis.push_back(EVS);
+                    std::vector<int> pos = {x, y, 0, validchess[i]};
+                    consider.push_back(pos);
                 } else if (y == 0) {
                     int newBoard[5][5];
                     for (int m = 0; m < 5; m++)
@@ -790,13 +570,9 @@ NetworkandEVS(std::shared_ptr<Board> v, bool col, std::mt19937 &gen, std::deque<
                     newBoard[x][y] = 0;
                     FakeBoard FB(newBoard);
                     double EVS = FB.getScore(1, betaone, lamda);
-                    if (EVS - max > 0.0) {
-                        pos[0] = x;
-                        pos[1] = y;
-                        pos[2] = 1;
-                        pos[3] = validchess[i];
-                        max = EVS;
-                    }
+                    max_problis.push_back(EVS);
+                    std::vector<int> pos = {x, y, 1, validchess[i]};
+                    consider.push_back(pos);
                 } else {
                     for (int index = 0; index < 3; index++) {
                         int newBoard[5][5];
@@ -805,52 +581,43 @@ NetworkandEVS(std::shared_ptr<Board> v, bool col, std::mt19937 &gen, std::deque<
                                 newBoard[m][n] = v->board[m][n];
                         if (index == 0) {
                             newBoard[x][y - 1] = DICE + 6;
-                            newBoard[x][y] = 0;
                         } else if (index == 1) {
                             newBoard[x - 1][y] = DICE + 6;
-                            newBoard[x][y] = 0;
                         } else {
                             newBoard[x - 1][y - 1] = DICE + 6;
-                            newBoard[x][y] = 0;
                         }
+                        newBoard[x][y] = 0;
                         FakeBoard FB(newBoard);
                         double EVS = FB.getScore(1, betaone, lamda);
-                        if (EVS - max > 0.0) {
-                            pos[0] = x;
-                            pos[1] = y;
-                            pos[2] = index;
-                            pos[3] = validchess[i];
-                            max = EVS;
-                        }
+                        max_problis.push_back(EVS);
+                        std::vector<int> pos = {x, y, index, validchess[i]};
+                        consider.push_back(pos);
                     }
                 }
             }
+            int direct = random_choices(SoftMax(max_problis, tempo));
+            std::vector<int> pos = consider[direct];
             if (pos[2] == 0) {
                 v->board[pos[0]][pos[1] - 1] = pos[3];
-                v->board[pos[0]][pos[1]] = 0;
             } else if (pos[2] == 1) {
                 v->board[pos[0] - 1][pos[1]] = pos[3];
-                v->board[pos[0]][pos[1]] = 0;
             } else {
                 v->board[pos[0] - 1][pos[1] - 1] = pos[3];
-                v->board[pos[0]][pos[1]] = 0;
             }
-            insertNewData(Q, v->board);
+            v->board[pos[0]][pos[1]] = 0;
         }
     }
     return !col;
 }
 
-int NeuralSimulate(std::shared_ptr<Board> v, std::mt19937 &gen, torch::jit::script::Module &model) {
+int simulate(std::shared_ptr<Board> v, std::mt19937 &gen) {
     int origin[5][5];
     for (int i = 0; i < 5; i++)
         for (int j = 0; j < 5; j++)
             origin[i][j] = v->board[i][j];
-    std::deque<std::array<std::array<int, 5>, 5>> datanew;
-    get_alldata_5(v, datanew);
     bool tempColor = v->color;
     while (!is_Terminal(v)) {
-        tempColor = NetworkandEVS(v, tempColor, gen, datanew, model);
+        tempColor = RandChoice(v, tempColor, gen);
     }
     //返回模拟结果
     int result;
@@ -890,40 +657,6 @@ void DeleteAll(std::shared_ptr<Board> v) {
     std::vector<std::shared_ptr<Board>>().swap(v->child);
 }
 
-std::shared_ptr<Board> UCT(int dice, int board[5][5], int &iteration, double qualities[6][3]) {
-    std::shared_ptr<Board> root;
-    std::shared_ptr<Board> none;
-    if (dice <= 6) {
-        root = std::make_shared<Board>(none, 0, board, dice);
-    } else {
-        root = std::make_shared<Board>(none, 1, board, dice);
-    }
-    iteration = 0;
-    for (int i = 0; i < 6; i++) {
-        for (int j = 0; j < 3; j++) {
-            qualities[i][j] = -1;
-        }
-    }
-    std::mt19937 gen(rd());
-    torch::jit::script::Module model = torch::jit::load("Alpha1.pt", device);
-    torch::NoGradGuard no_grad;
-    auto start = std::chrono::steady_clock::now();
-    auto end = std::chrono::steady_clock::now();
-    auto diff_time = std::chrono::duration<double, std::milli>(end - start).count();
-    while (diff_time < 15000) {
-        std::shared_ptr<Board> p;
-        p = Treepolicy(root);
-        int result = NeuralSimulate(p, gen, model);
-        Backup(p, result);
-        iteration++;
-        end = std::chrono::steady_clock::now();
-        diff_time = std::chrono::duration<double, std::milli>(end - start).count();
-    }
-    std::shared_ptr<Board> best;
-    best = MostWin(root, qualities);
-    return best;
-}
-
 std::shared_ptr<Board> UCTP(int dice, int board[5][5], int &iter, double qualities[6][3]) {
     std::shared_ptr<Board> root;
     std::shared_ptr<Board> none;
@@ -944,12 +677,10 @@ std::shared_ptr<Board> UCTP(int dice, int board[5][5], int &iter, double qualiti
     int Move_Num = root->posStep[0].size();
     omp_set_num_threads(Move_Num);
 
-#pragma omp parallel for reduction(+:iteration)
+#pragma omp parallel for reduction(+:iteration) default(none) shared(Move_Num, device, root)
     for (int index = 0; index < Move_Num; index++) {
         unsigned seed = std::chrono::system_clock::now().time_since_epoch().count() + omp_get_thread_num();
         std::mt19937 gen(seed);
-        torch::jit::script::Module model = torch::jit::load("Alpha1.pt", device);
-        torch::NoGradGuard no_grad;
         int newBoard[5][5];
         for (int i = 0; i < 5; i++)
             for (int j = 0; j < 5; j++)
@@ -968,10 +699,10 @@ std::shared_ptr<Board> UCTP(int dice, int board[5][5], int &iter, double qualiti
         auto start = std::chrono::steady_clock::now();
         auto end = std::chrono::steady_clock::now();
         auto diff_time = std::chrono::duration<double, std::milli>(end - start).count();
-        while (diff_time < 15000) {
+        while (diff_time < 100000) {
             std::shared_ptr<Board> p;
             p = Treepolicy(newChild);
-            int result = NeuralSimulate(p, gen, model);
+            int result = simulate(p, gen);
             Backup(p, result);
             iteration++;
             end = std::chrono::steady_clock::now();
@@ -1136,7 +867,7 @@ int CEinstein::handle() {
         std::shared_ptr<Board> best;
         int iter;
         double qualities[6][3];
-        best = UCT(dice, board, iter, qualities);
+        best = UCTP(dice, board, iter, qualities);
         std::string str;
         if (dice <= 6) {
             if (best->chess[1] == 0)

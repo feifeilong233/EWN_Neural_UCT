@@ -42,6 +42,7 @@ add_executable(EWN_Neural
         ClientSocket.cpp
         ClientSocket.h
         Define.h
+        Board.h
         CFakeBoard.h
         CEinstein.cpp
         CEinstein.h
